@@ -8,6 +8,7 @@ use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
 use memory_addr::{VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
+use alloc::vec::Vec;
 use arceos_posix_api as api;
 
 const SYS_IOCTL: usize = 29;
@@ -138,7 +139,7 @@ fn sys_mmap(
     prot: i32,
     flags: i32,
     fd: i32,
-    _offset: isize,
+    offset: isize,
 ) -> isize {
     syscall_body!(sys_mmap, {
         // 解析 flags 和 prot
@@ -146,11 +147,6 @@ fn sys_mmap(
             .ok_or(LinuxError::EINVAL)?;
         let mmap_prot = MmapProt::from_bits(prot)
             .ok_or(LinuxError::EINVAL)?;
-        
-        // 检查 MAP_ANONYMOUS（文件映射暂不支持）
-        if !mmap_flags.contains(MmapFlags::MAP_ANONYMOUS) {
-            return Err(LinuxError::EINVAL);
-        }
         
         // 对齐长度到 4KB
         let aligned_length = (length + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
@@ -184,13 +180,56 @@ fn sys_mmap(
         // 转换权限标志
         let mapping_flags = MappingFlags::from(mmap_prot);
         
-        // 分配内存
-        aspace.map_alloc(start_addr, aligned_length, mapping_flags, true)
-            .map_err(|e| match e {
-                axerrno::AxError::NoMemory => LinuxError::ENOMEM,
-                axerrno::AxError::InvalidInput => LinuxError::EINVAL,
-                _ => LinuxError::EAGAIN,
-            })?;
+        // 处理文件映射或匿名映射
+        if mmap_flags.contains(MmapFlags::MAP_ANONYMOUS) {
+            // 匿名映射：直接分配内存
+            aspace.map_alloc(start_addr, aligned_length, mapping_flags, true)
+                .map_err(|e| match e {
+                    axerrno::AxError::NoMemory => LinuxError::ENOMEM,
+                    axerrno::AxError::InvalidInput => LinuxError::EINVAL,
+                    _ => LinuxError::EAGAIN,
+                })?;
+        } else {
+            // 文件映射：需要从文件读取内容
+            if fd < 0 {
+                return Err(LinuxError::EBADF);
+            }
+            
+            // 获取文件对象
+            let file_like = api::imp::fd_ops::get_file_like(fd)?;
+            
+            // 分配内存
+            aspace.map_alloc(start_addr, aligned_length, mapping_flags, true)
+                .map_err(|e| match e {
+                    axerrno::AxError::NoMemory => LinuxError::ENOMEM,
+                    axerrno::AxError::InvalidInput => LinuxError::EINVAL,
+                    _ => LinuxError::EAGAIN,
+                })?;
+            
+            // 读取文件内容到临时缓冲区
+            let mut file_data = vec![0u8; length];
+            let mut total_read = 0;
+            
+            // 如果 offset 不为 0，需要先 seek（通过系统调用）
+            if offset != 0 {
+                // 使用 sys_lseek 定位文件
+                let _ = api::sys_lseek(fd, offset, 0); // SEEK_SET = 0
+            }
+            
+            // 读取文件内容
+            while total_read < length {
+                let buf = &mut file_data[total_read..];
+                let read_size = file_like.read(buf)?;
+                if read_size == 0 {
+                    break; // EOF
+                }
+                total_read += read_size;
+            }
+            
+            // 将文件内容写入映射的内存
+            aspace.write(start_addr, &file_data[..total_read])
+                .map_err(|_| LinuxError::EFAULT)?;
+        }
         
         Ok(start_addr.as_usize() as isize)
     })
