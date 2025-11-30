@@ -3,10 +3,11 @@
 use core::ffi::{c_void, c_char, c_int};
 use axhal::arch::TrapFrame;
 use axhal::trap::{register_trap_handler, SYSCALL};
-use axerrno::LinuxError;
+use axerrno::{LinuxError, LinuxResult};
 use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
+use memory_addr::{VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
 use arceos_posix_api as api;
 
 const SYS_IOCTL: usize = 29;
@@ -131,16 +132,68 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ret
 }
 
-#[allow(unused_variables)]
 fn sys_mmap(
-    addr: *mut usize,
+    addr: usize,
     length: usize,
     prot: i32,
     flags: i32,
     fd: i32,
     _offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    syscall_body!(sys_mmap, {
+        // 解析 flags 和 prot
+        let mmap_flags = MmapFlags::from_bits(flags)
+            .ok_or(LinuxError::EINVAL)?;
+        let mmap_prot = MmapProt::from_bits(prot)
+            .ok_or(LinuxError::EINVAL)?;
+        
+        // 检查 MAP_ANONYMOUS（文件映射暂不支持）
+        if !mmap_flags.contains(MmapFlags::MAP_ANONYMOUS) {
+            return Err(LinuxError::EINVAL);
+        }
+        
+        // 对齐长度到 4KB
+        let aligned_length = (length + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
+        if aligned_length == 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        
+        // 获取地址空间
+        let curr = current();
+        let mut aspace = curr.task_ext().aspace.lock();
+        
+        // 确定映射地址
+        let start_addr = if mmap_flags.contains(MmapFlags::MAP_FIXED) {
+            // MAP_FIXED: 使用指定地址（需要对齐）
+            let vaddr = VirtAddr::from(addr);
+            if !vaddr.is_aligned_4k() {
+                return Err(LinuxError::EINVAL);
+            }
+            vaddr
+        } else {
+            // 查找空闲区域
+            let hint = VirtAddr::from(addr);
+            let limit = VirtAddrRange::from_start_size(
+                aspace.base(),
+                aspace.size()
+            );
+            aspace.find_free_area(hint, aligned_length, limit)
+                .ok_or(LinuxError::ENOMEM)?
+        };
+        
+        // 转换权限标志
+        let mapping_flags = MappingFlags::from(mmap_prot);
+        
+        // 分配内存
+        aspace.map_alloc(start_addr, aligned_length, mapping_flags, true)
+            .map_err(|e| match e {
+                axerrno::AxError::NoMemory => LinuxError::ENOMEM,
+                axerrno::AxError::InvalidInput => LinuxError::EINVAL,
+                _ => LinuxError::EAGAIN,
+            })?;
+        
+        Ok(start_addr.as_usize() as isize)
+    })
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
