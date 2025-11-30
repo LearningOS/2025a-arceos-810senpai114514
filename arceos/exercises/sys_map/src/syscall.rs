@@ -210,11 +210,17 @@ fn sys_mmap(
             let mut file_data = vec![0u8; length];
             let mut total_read = 0;
             
-            // 如果 offset 不为 0，需要先 seek（通过系统调用）
-            if offset != 0 {
-                // 使用 sys_lseek 定位文件
+            // 如果 offset 不为 0，需要先 seek 到 offset 位置
+            // 保存当前位置（通过 sys_lseek 获取）
+            let saved_pos = if offset != 0 {
+                // 获取当前位置
+                let current_pos = api::sys_lseek(fd, 0, 1); // SEEK_CUR = 1
+                // Seek 到 offset
                 let _ = api::sys_lseek(fd, offset, 0); // SEEK_SET = 0
-            }
+                Some(current_pos)
+            } else {
+                None
+            };
             
             // 读取文件内容
             while total_read < length {
@@ -224,6 +230,11 @@ fn sys_mmap(
                     break; // EOF
                 }
                 total_read += read_size;
+            }
+            
+            // 恢复文件位置（如果之前保存了）
+            if let Some(pos) = saved_pos {
+                let _ = api::sys_lseek(fd, pos, 0); // SEEK_SET = 0
             }
             
             // 将文件内容写入映射的内存
