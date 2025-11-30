@@ -142,7 +142,6 @@ fn sys_mmap(
     offset: isize,
 ) -> isize {
     syscall_body!(sys_mmap, {
-        // 解析 flags 和 prot
         let mmap_flags = MmapFlags::from_bits(flags)
             .ok_or(LinuxError::EINVAL)?;
         let mmap_prot = MmapProt::from_bits(prot)
