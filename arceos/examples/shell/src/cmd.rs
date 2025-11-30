@@ -24,7 +24,9 @@ const CMD_TABLE: &[(&str, CmdHandler)] = &[
     ("help", do_help),
     ("ls", do_ls),
     ("mkdir", do_mkdir),
+    ("mv", do_mv),
     ("pwd", do_pwd),
+    ("rename", do_rename),
     ("rm", do_rm),
     ("uname", do_uname),
 ];
@@ -222,6 +224,52 @@ fn do_rm(args: &str) {
         if let Err(e) = rm_one(path, rm_dir) {
             print_err!("rm", format_args!("cannot remove '{path}'"), e);
         }
+    }
+}
+
+fn do_rename(args: &str) {
+    if args.is_empty() {
+        print_err!("rename", "missing operand");
+        return;
+    }
+
+    let (old_path, rest) = split_whitespace(args);
+    if old_path.is_empty() {
+        print_err!("rename", "missing operand");
+        return;
+    }
+
+    let (new_path, _) = split_whitespace(rest);
+    if new_path.is_empty() {
+        print_err!("rename", "missing destination file operand");
+        return;
+    }
+
+    if let Err(e) = fs::rename(old_path, new_path) {
+        print_err!("rename", format_args!("cannot rename '{old_path}' to '{new_path}'"), e);
+    }
+}
+
+fn do_mv(args: &str) {
+    if args.is_empty() {
+        print_err!("mv", "missing operand");
+        return;
+    }
+
+    let (old_path, rest) = split_whitespace(args);
+    if old_path.is_empty() {
+        print_err!("mv", "missing operand");
+        return;
+    }
+
+    let (new_path, _) = split_whitespace(rest);
+    if new_path.is_empty() {
+        print_err!("mv", "missing destination file operand");
+        return;
+    }
+
+    if let Err(e) = fs::rename(old_path, new_path) {
+        print_err!("mv", format_args!("cannot move '{old_path}' to '{new_path}'"), e);
     }
 }
 
